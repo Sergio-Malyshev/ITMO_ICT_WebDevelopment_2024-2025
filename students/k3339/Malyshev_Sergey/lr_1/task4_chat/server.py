@@ -4,12 +4,17 @@ import threading
 HOST = 'localhost'
 PORT = 9090
 
-clients = []    # общий список клиентов
-nicknames = []  # общий список никнеймов
+clients = []     # список сокетов клиентов
+nicknames = []   # список никнеймов
+
 
 def broadcast(message):
     for client in clients:
-        client.send(message)
+        try:
+            client.send(message)
+        except:
+            pass
+
 
 def handle_client(client):
     while True:
@@ -17,29 +22,34 @@ def handle_client(client):
             message = client.recv(1024)
             broadcast(message)
         except:
-            index = clients.index(client)
-            clients.remove(client)
-            client.close()
-            nickname = nicknames[index]
-            nicknames.remove(nickname)
-            broadcast(f"{nickname} leave chat.".encode('utf-8'))
+            if client in clients:
+                index = clients.index(client)
+                clients.remove(client)
+                client.close()
+
+                nickname = nicknames[index]
+                nicknames.remove(nickname)
+
+                broadcast(f"{nickname} left the chat.".encode('utf-8'))
             break
 
-def main():
-    sock = socket.socket()
-    sock.bind((HOST, PORT))
-    sock.listen(5)
 
-    print("Server started, waiting for connection...")
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((HOST, PORT))
+    server.listen(5)
+
+    print("Server started, waiting for connections...")
 
     while True:
-        client, address = sock.accept()
-        print(f"Подключен {address}")
+        client, address = server.accept()
+        print(f"Connected: {address}")
 
-        client.send('nickname'.encode('utf-8'))  # запрос никнейма
+        client.send('nickname'.encode('utf-8'))
         nickname = client.recv(1024).decode('utf-8')
-        nicknames.append(nickname)
+
         clients.append(client)
+        nicknames.append(nickname)
 
         print(f"Client nickname: {nickname}")
         broadcast(f"{nickname} joined the chat!".encode('utf-8'))
@@ -47,6 +57,7 @@ def main():
 
         thread = threading.Thread(target=handle_client, args=(client,))
         thread.start()
+
 
 if __name__ == "__main__":
     main()

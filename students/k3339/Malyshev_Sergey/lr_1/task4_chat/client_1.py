@@ -9,6 +9,7 @@ nickname = input("Enter your nickname: ")
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client.connect((HOST, PORT))
 
+
 def receive_message():
     while True:
         try:
@@ -18,14 +19,23 @@ def receive_message():
             else:
                 print(message)
         except:
-            print("Error receiving message!")
+            print("Disconnected from server.")
             client.close()
             break
 
+
 def write_message():
     while True:
-        message = f"{nickname}: {input('')}"
-        client.send(message.encode('utf-8'))
+        text = input()
+
+        if text == "/quit":
+            client.send(f"{nickname} left the chat.".encode('utf-8'))
+            client.close()
+            break
+        else:
+            message = f"{nickname}: {text}"
+            client.send(message.encode('utf-8'))
+
 
 receive_thread = threading.Thread(target=receive_message)
 receive_thread.start()
