@@ -1,3 +1,4 @@
+from django.forms import IntegerField
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticatedOrReadOnly
@@ -9,6 +10,10 @@ from django.db.models.functions import ExtractQuarter, ExtractYear
 from datetime import date
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from collections import defaultdict
+from django.db.models.functions import Cast
+from django.db.models import Func, Value
+
 
 from .models import (
     RoomType, Room, Guest, Booking, Employee, CleaningAssignment
@@ -148,6 +153,17 @@ class BookingViewSet(viewsets.ModelViewSet):
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
 
+    filter_backends = [filters.SearchFilter]
+    search_fields = [
+        'guest__last_name', 'guest__first_name', 'guest__patronymic', 'guest__passport',
+        'room__number'
+    ]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        # Дополнительные фильтры, если нужно
+        return queryset.order_by('-check_in')
+
     @action(detail=True, methods=['get'], url_path='cleaner-on-day')
     def cleaner_on_day(self, request, pk=None):
         booking = self.get_object()
@@ -191,62 +207,77 @@ class CleaningAssignmentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
 
+from collections import defaultdict
+from datetime import date
+from dateutil.relativedelta import relativedelta
+from django.db.models import Count, Q, Sum, F
+from django.db.models import Value, DecimalField, ExpressionWrapper
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticatedOrReadOnly
+
 class QuarterReportView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
+
     def get(self, request):
-        year = request.query_params.get('year', date.today().year)
-        quarter = request.query_params.get('quarter', 1)
+        year = int(request.query_params.get('year', date.today().year))
+        quarter = int(request.query_params.get('quarter', 1))
 
-        try:
-            year = int(year)
-            quarter = int(quarter)
-            if quarter not in [1, 2, 3, 4]:
-                raise ValueError
-        except ValueError:
-            return Response({"detail": "Укажите ?year=2025&quarter=1-4"}, status=400)
+        if quarter not in [1, 2, 3, 4]:
+            return Response({"detail": "quarter должен быть 1-4"}, status=400)
 
-        # Начало и конец квартала
-        quarter_start = date(year, (quarter-1)*3 + 1, 1)
+        quarter_start = date(year, (quarter - 1) * 3 + 1, 1)
         quarter_end = quarter_start + relativedelta(months=3) - relativedelta(days=1)
 
-        # 1. Число клиентов за период в каждом номере
+        today = date.today()
+
+        # Клиенты по номерам (пересечение периодов)
         clients_per_room = Booking.objects.filter(
             Q(check_in__lte=quarter_end),
             Q(check_out__gte=quarter_start) | Q(check_out__isnull=True)
         ).values(
             'room__number', 'room__floor'
         ).annotate(
-            client_count=Count('guest', distinct=True),
-            total_days=Sum(
-                ExpressionWrapper(
-                    F('check_out') - F('check_in'),
-                    output_field=DecimalField()
-                )
-            )
+            client_count=Count('guest', distinct=True)
         ).order_by('room__number')
 
-        # 2. Количество номеров на каждом этаже (всегда)
         rooms_per_floor = Room.objects.values('floor').annotate(count=Count('id'))
 
-        # 3. Доход за каждый номер
-        revenue_per_room = Booking.objects.filter(
-            Q(check_in__lte=quarter_end),
-            Q(check_out__gte=quarter_start) | Q(check_out__isnull=True)
-        ).annotate(
-            days_stayed=ExpressionWrapper(
-                F('check_out') - F('check_in'),
-                output_field=DecimalField()
-            )
-        ).values(
-            'room__number'
-        ).annotate(
-            revenue=Sum(
-                F('days_stayed') * F('room__room_type__price_per_day'),
-                output_field=DecimalField()
-            )
-        )
+        revenue_dict = defaultdict(float)
 
-        total_revenue = sum(item['revenue'] or 0 for item in revenue_per_room)
+        # Завершённые брони
+        completed = Booking.objects.filter(
+            check_in__lte=quarter_end,
+            check_out__gte=quarter_start,
+            check_out__isnull=False
+        ).select_related('room__room_type')
+
+        for b in completed:
+            days = (b.check_out - b.check_in).days
+            if days > 0:
+                price = b.room.room_type.price_per_day
+                revenue_dict[b.room.number] += float(days * price)
+
+        # Активные брони (до today)
+        active = Booking.objects.filter(
+            check_in__lte=quarter_end,
+            check_out__isnull=True
+        ).filter(
+            check_in__lte=today  # отдельный filter — без дублирования
+        ).select_related('room__room_type')
+
+        for b in active:
+            days = (today - b.check_in).days
+            if days > 0:
+                price = b.room.room_type.price_per_day
+                revenue_dict[b.room.number] += float(days * price)
+
+        revenue_per_room = [
+            {'room__number': number, 'revenue': revenue}
+            for number, revenue in revenue_dict.items()
+        ]
+
+        total_revenue = sum(revenue for revenue in revenue_dict.values())
 
         return Response({
             "year": year,
@@ -257,6 +288,6 @@ class QuarterReportView(APIView):
             },
             "rooms_per_floor": list(rooms_per_floor),
             "clients_per_room": list(clients_per_room),
-            "revenue_per_room": list(revenue_per_room),
-            "total_revenue": float(total_revenue)  # Decimal → float для JSON
+            "revenue_per_room": revenue_per_room,
+            "total_revenue": float(total_revenue)
         })
